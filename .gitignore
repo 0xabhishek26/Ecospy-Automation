@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+waste_collected/
+serviceAccountKey.json
