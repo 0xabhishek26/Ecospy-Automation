@@ -109,7 +109,7 @@ for item, qty in recyclable_items.items():
         weight = data.get("weight", 0.0)
         waste_type = data.get("type", "Mixed")  # fetch waste type from Firebase
 
-        total_payout += (price * weight * qty)  # ecopoints + weight contribution
+        total_payout += (price * weight * qty)  # ecopoints * weight contribution
         total_weight += weight * qty
         item_types.extend([waste_type] * qty)
 
