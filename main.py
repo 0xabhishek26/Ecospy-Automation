@@ -1,5 +1,6 @@
 import cv2
 import os
+from collections import Counter
 from ultralytics import YOLO
 from waste_mapping import check_recyclability
 
@@ -27,6 +28,7 @@ def get_next_filename():
     next_index = max(existing, default=0) + 1
     return os.path.join(folder, f"{next_index}.jpg")
 
+# ===== Capture image =====
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -43,7 +45,9 @@ while True:
         print(f"✅ Captured & saved {filename}")
         break
     elif key == ord('q'):
-        break
+        cap.release()
+        cv2.destroyAllWindows()
+        exit()
 
 cap.release()
 cv2.destroyAllWindows()
@@ -55,54 +59,121 @@ recyclable_items = {}
 
 for box in results[0].boxes:
     cls = int(box.cls[0])
-    conf = float(box.conf[0])
     label = results[0].names[cls].lower()
     all_detected_items.append(label)
 
-    status = check_recyclability(label)
-    if status == "Recyclable":
+    if check_recyclability(label) == "Recyclable":
         recyclable_items[label] = recyclable_items.get(label, 0) + 1
 
 print("\n♻️ Final Detection on Captured Image")
 print("All Detected Items:", all_detected_items)
-print("Recyclable Items:", recyclable_items if recyclable_items else "None found")
+if not recyclable_items:
+    print("❌ No recyclable items detected. Exiting program.")
+    exit()
+print("Recyclable Items:", recyclable_items)
 
-# ===== Firebase User Flow =====
-if recyclable_items:
-    account_no = input("\nEnter Account Number: ").strip()
+# ===== Firebase User Flow (via email OR phone) =====
+while True:
+    user_input = input("\nEnter registered Email or Mobile (or 'q' to quit): ").strip()
+    if user_input.lower() == 'q':
+        print("❌ Exiting program.")
+        exit()
+
+    users_ref = db.collection("users")
     
-    user_ref = db.collection("users").document(account_no)
-    user_doc = user_ref.get()
+    # Query: check email OR phone
+    query = users_ref.where("email", "==", user_input).limit(1).get()
+    if not query:
+        query = users_ref.where("phone", "==", user_input).limit(1).get()
 
-    if user_doc.exists:
+    if query:
+        user_doc = query[0]
+        user_ref = user_doc.reference
         user_data = user_doc.to_dict()
-        print(f"✅ User found: {user_data['name']} (Balance: {user_data['balance']})")
-
-        # Calculate total payout
-        total_payout = 0
-        for item, qty in recyclable_items.items():
-            price_doc = db.collection("recyclable_items").document(item).get()
-            if price_doc.exists:
-                total_payout += price_doc.to_dict().get("price", 0) * qty
-
-        print(f"💰 Total Payout: {total_payout} points")
-
-        confirm = input("Do you want to add this amount to user balance? (y/n): ").strip().lower()
-        if confirm == "y":
-            user_ref.update({
-                "balance": firestore.Increment(total_payout)
-            })
-
-            # Save transaction record
-            db.collection("transactions").add({
-                "account_no": account_no,
-                "items": recyclable_items,
-                "payout": total_payout,
-                "timestamp": datetime.utcnow()
-            })
-
-            print(f"✅ Balance updated! {user_data['name']} received {total_payout} points.")
-        else:
-            print("❌ Transaction cancelled.")
+        break
     else:
-        print(f"❌ User not found for Account Number: {account_no}")
+        print("❌ User not found. Please try again or press 'q' to quit.")
+
+print(f"✅ Logged in as: {user_data['name']} (Current EcoPoints: {user_data['ecopoints']})")
+
+# ===== Calculate total payout and weight =====
+total_payout = 0
+total_weight = 0.0
+item_types = []
+
+for item, qty in recyclable_items.items():
+    doc = db.collection("recyclable_items").document(item).get()
+    if doc.exists:
+        data = doc.to_dict()
+        price = data.get("price", 0)
+        weight = data.get("weight", 0.0)
+        waste_type = data.get("type", "Mixed")  # fetch waste type from Firebase
+
+        total_payout += (price * weight * qty)  # ecopoints + weight contribution
+        total_weight += weight * qty
+        item_types.extend([waste_type] * qty)
+
+print(f"💰 Total Payout: {total_payout} points")
+print(f"⚖️ Total Weight: {total_weight} kg")
+
+# Determine most frequent waste type
+if item_types:
+    waste_type_final = Counter(item_types).most_common(1)[0][0]
+else:
+    waste_type_final = "Mixed"
+
+confirm = input("Do you want to add this amount to user EcoPoints? (y/n): ").strip().lower()
+if confirm != 'y':
+    print("❌ Transaction cancelled.")
+    exit()
+
+# ===== Sequential DOC ID for wasteHistory =====
+waste_history_ref = user_ref.collection("wasteHistory")
+docs = waste_history_ref.stream()
+max_doc_no = 0
+for doc in docs:
+    try:
+        num = int(doc.id.replace("DOC", ""))
+        if num > max_doc_no:
+            max_doc_no = num
+    except:
+        continue
+next_doc_id = f"DOC{str(max_doc_no + 1).zfill(3)}"
+
+# Example location (replace with GPS if available)
+location = [28.61, 77.20]
+
+# Timestamp UTC
+collection_date = datetime.utcnow().isoformat()
+
+# ===== Update Firebase =====
+existing_weight = user_data.get("wastecollected", 0)
+new_total_weight = existing_weight + total_weight
+
+user_ref.update({
+    "ecopoints": firestore.Increment(total_payout),
+    "wastecollected": new_total_weight
+})
+
+# ===== Update wasteHistory =====
+waste_history_ref.document(next_doc_id).set({
+    "collectionDate": collection_date,
+    "location": location,
+    "pointsEarned": total_payout,
+    "status": "Recycled",
+    "wasteType": waste_type_final,
+    "weightKg": total_weight
+})
+
+# ===== Save transaction record =====
+db.collection("transactions").add({
+    "email_or_phone": user_input,
+    "items": recyclable_items,
+    "payout": total_payout,
+    "weightKg": total_weight,
+    "timestamp": datetime.utcnow()
+})
+
+print(f"✅ EcoPoints updated! {user_data['name']} received {total_payout} points.")
+print(f"💰 New EcoPoints: {user_data['ecopoints'] + total_payout}")
+print(f"⚖️ Total Waste Collected (all time): {new_total_weight} kg")
