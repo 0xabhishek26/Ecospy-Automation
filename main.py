@@ -4,18 +4,18 @@ from collections import Counter
 from ultralytics import YOLO
 from waste_mapping import check_recyclability
 
-# ===== Firebase imports =====
+
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
 
-# ===== Firebase setup =====
+
 cred = credentials.Certificate("serviceAccountKey.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 print("✅ Firebase setup complete!")
 
-# ===== YOLO & Camera =====
+
 model = YOLO("yolov8n.pt")
 folder = "waste_collected"
 os.makedirs(folder, exist_ok=True)
@@ -25,7 +25,7 @@ def get_next_filename():
     next_index = max(existing, default=0) + 1
     return os.path.join(folder, f"{next_index}.jpg")
 
-# ===== Core functions =====
+
 
 def detect_recyclables(model, filename):
     """Return all detected items and recyclable items dictionary"""
@@ -41,10 +41,10 @@ def detect_recyclables(model, filename):
     return all_detected_items, recyclable_items
 
 def calculate_payout(db, recyclable_items):
-    """Return total payout, total weight, and most frequent waste type"""
+    """Return total payout, total weight, and final waste type"""
     total_payout = 0
     total_weight = 0.0
-    item_types = []
+    item_types = set()  
 
     for item, qty in recyclable_items.items():
         doc = db.collection("recyclable_items").document(item).get()
@@ -53,35 +53,40 @@ def calculate_payout(db, recyclable_items):
             price = data.get("price", 0)
             weight = data.get("weight", 0.0)
             waste_type = data.get("type", "Mixed")
+            
             total_payout += price * weight * qty
             total_weight += weight * qty
-            item_types.extend([waste_type] * qty)
+            item_types.add(waste_type)  
 
-    if item_types:
-        waste_type_final = Counter(item_types).most_common(1)[0][0]
-    else:
+    
+    if len(item_types) == 0:
         waste_type_final = "Mixed"
+    elif len(item_types) == 1:
+        waste_type_final = list(item_types)[0]  
+    else:
+        waste_type_final = "Mixed"  
 
     return total_payout, total_weight, waste_type_final
+
 
 def update_firebase(user_ref, total_payout, total_weight, waste_type):
     """Update user EcoPoints, waste collected, and add wasteHistory record"""
     existing_weight = user_ref.get().to_dict().get("wastecollected", 0)
     new_total_weight = existing_weight + total_weight
 
-    # Update user document
+    
     user_ref.update({
         "ecopoints": firestore.Increment(total_payout),
         "wastecollected": new_total_weight
     })
 
-    # Add wasteHistory
+    
     waste_history_ref = user_ref.collection("wasteHistory")
     docs = list(waste_history_ref.stream())
     next_doc_id = f"DOC{len(docs)+1:03}"
     waste_history_ref.document(next_doc_id).set({
         "collectionDate": datetime.utcnow().isoformat(),
-        "location": [28.61, 77.20],  # Dummy location
+        "location": [28.61, 77.20],  
         "pointsEarned": total_payout,
         "status": "Recycled",
         "wasteType": waste_type,
@@ -90,7 +95,7 @@ def update_firebase(user_ref, total_payout, total_weight, waste_type):
 
     return new_total_weight
 
-# ===== Main workflow =====
+
 if __name__ == "__main__":
     cap = cv2.VideoCapture(0)
     print("📷 Press 'P' to capture with detection, 'Q' to quit")
@@ -123,7 +128,7 @@ if __name__ == "__main__":
         print("❌ No image captured. Exiting.")
         exit()
 
-    # ===== YOLO detection on captured image =====
+    
     all_detected_items, recyclable_items = detect_recyclables(model, filename)
 
     print("\n♻️ Final Detection on Captured Image")
@@ -133,7 +138,7 @@ if __name__ == "__main__":
         exit()
     print("Recyclable Items:", recyclable_items)
 
-    # ===== Firebase User Flow =====
+    
     while True:
         user_input = input("\nEnter registered Email or Mobile (or 'q' to quit): ").strip()
         if user_input.lower() == 'q':
@@ -152,14 +157,14 @@ if __name__ == "__main__":
             user_ref = user_doc.reference
             user_data = user_doc.to_dict()
 
-            # fix duplicate mobile field
+            
             if "mobilemobile" in user_data:
                 user_data["mobile"] = user_data.pop("mobilemobile")
 
             allowed_fields = ["name", "email", "phone", "mobile", "ecopoints", "wastecollected"]
             user_data = {k: v for k, v in user_data.items() if k in allowed_fields}
 
-            # ✅ Verification step
+           
             print("\n🔎 User Found!")
             print(f"👤 Name: {user_data.get('name', 'N/A')}")
             print(f"📧 Email: {user_data.get('email', 'N/A')}")
@@ -176,7 +181,7 @@ if __name__ == "__main__":
         else:
             print("❌ User not found. Please try again or press 'q' to quit.")
 
-    # ===== Payout calculation =====
+    
     total_payout, total_weight, waste_type_final = calculate_payout(db, recyclable_items)
 
     print(f"\n💰 Total Payout: {total_payout} points")
